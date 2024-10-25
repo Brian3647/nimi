@@ -11,6 +11,7 @@ mod config;
 mod error;
 
 use config::Config;
+use serde_json::Value;
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
@@ -39,8 +40,7 @@ fn main() -> error::Result<()> {
 		Some(toki) => toki,
 	};
 
-	let url = format!("https://api.linku.la/v1/words/{}?lang={}", cli.word, toki);
-
+	let url = format!("https://api.linku.la/v1/words?lang={}", toki);
 	let response_string = match cache::get_from_cache(&url, cfg.cache_lifetime_seconds)? {
 		None => {
 			let result = isahc::get(&url)?.text()?;
@@ -50,12 +50,12 @@ fn main() -> error::Result<()> {
 		Some(result) => result,
 	};
 
+	let json: Value = serde_json::from_str(&response_string)?;
 	if cli.json {
-		println!("{}", response_string);
+		println!("{}", json[cli.word].clone());
 		return Ok(());
 	}
-
-	let response: ApiResult = serde_json::from_str(&response_string)?;
+	let response: ApiResult = serde_json::from_value(json[cli.word].clone())?;
 	match response {
 		ApiResult::Word(word) => show(word, toki),
 		ApiResult::Error { message } => eprintln!("Error: {}", message),
