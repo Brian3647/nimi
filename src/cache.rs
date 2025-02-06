@@ -1,62 +1,50 @@
-use crate::error::Result;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, time::SystemTime};
+use color_eyre::eyre::{Context, ContextCompat};
+use color_eyre::Result;
+use serde_json::Value;
+use std::fs::File;
+use std::io::BufReader;
+use std::{fs, time::SystemTime};
 
-#[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
-struct CacheEntry {
-	content: String,
-	created: SystemTime,
+fn get_cachefile_path(toki: &str) -> Result<std::path::PathBuf> {
+	let mut path = dirs::cache_dir().wrap_err("Failed to get cache path")?;
+	path.push("seme");
+	fs::create_dir_all(&path).wrap_err("Failed to create cache directory")?;
+	path.push(format!("{toki}.json"));
+	Ok(path)
 }
 
-pub fn add_cache(url: String, result: String) -> Result<()> {
-	let mut cache = read_cache_file()?;
+pub fn get_from_cache(toki: &str, cache_lifetime_seconds: u64) -> Result<Option<Value>> {
+	let path = get_cachefile_path(toki)?;
+	let file = match File::open(path) {
+		Ok(file) => Ok(file),
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+		Err(e) => Err(e),
+	}?;
 
-	cache.insert(
-		url,
-		CacheEntry {
-			content: result,
-			created: SystemTime::now(),
-		},
-	);
+	let modified = file
+		.metadata()
+		.wrap_err("Failed to get cache file metadata")?
+		.modified()
+		.wrap_err("Failed to get file modification date")?;
+	let cache_still_valid =
+		SystemTime::now().duration_since(modified)?.as_secs() <= cache_lifetime_seconds;
 
-	write_to_cache(cache)
+	let result = cache_still_valid
+		.then(|| get_json_from_file(file))
+		.transpose()?;
+	Ok(result)
 }
 
-#[allow(unused_must_use)]
-pub fn get_from_cache(url: &String, cache_lifetime_seconds: u64) -> Result<Option<String>> {
-	let mut cache = read_cache_file()?;
-	if let Some(entry) = cache.get(url) {
-		if SystemTime::now().duration_since(entry.created).unwrap()
-			<= std::time::Duration::from_secs(cache_lifetime_seconds)
-		{
-			return Ok(Some(entry.content.clone()));
-		}
-
-		cache.remove(url);
-		write_to_cache(cache);
-	}
-
-	Ok(None)
+fn get_json_from_file(file: File) -> Result<Value> {
+	let reader = BufReader::new(file);
+	serde_json::from_reader(reader).wrap_err("Failed to parse cache file as json")
 }
 
-fn get_cachefile_path() -> std::path::PathBuf {
-	let mut cachefile_path = dirs::cache_dir().unwrap();
-	cachefile_path.push("seme.json");
-	cachefile_path
-}
-
-fn read_cache_file() -> Result<HashMap<String, CacheEntry>> {
-	let path = get_cachefile_path();
-	if !path.exists() {
-		fs::write(&path, "{}")?;
-	}
-
-	Ok(serde_json::from_str(&String::from_utf8(fs::read(path)?)?)?)
-}
-
-fn write_to_cache(cache: HashMap<String, CacheEntry>) -> Result<()> {
-	Ok(fs::write(
-		get_cachefile_path(),
-		serde_json::to_string(&cache)?,
-	)?)
+pub fn write_to_cache(language: &str, value: &Value) -> Result<()> {
+	fs::write(
+		get_cachefile_path(language)?,
+		serde_json::to_string(value)
+			.wrap_err_with(|| format!("Invalid response to add to cache: {}", value))?,
+	)
+	.wrap_err("Failed to write cache")
 }

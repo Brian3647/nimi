@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use clap::Parser;
+use color_eyre::eyre::eyre;
+use color_eyre::eyre::Context;
 use colored::ColoredString;
 use colored::Colorize;
 use isahc::ReadResponseExt;
@@ -8,16 +10,26 @@ use linku_sona::{UsageCategory, Word};
 
 mod cache;
 mod config;
-mod error;
 
+use color_eyre::Result;
 use config::Config;
 use serde_json::Value;
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum ApiResult {
-	Word(Box<Word>),
+	Word(Word),
 	Error { message: String },
+}
+
+impl From<ApiResult> for Result<Word> {
+	fn from(val: ApiResult) -> Self {
+		match val {
+			ApiResult::Word(word) => Ok(word),
+			ApiResult::Error { message } => Err(eyre!("Api error: {}", message)),
+		}
+	}
 }
 
 #[derive(Parser)]
@@ -32,38 +44,43 @@ struct Cli {
 	word: String,
 }
 
-fn main() -> error::Result<()> {
+fn main() -> Result<()> {
+	color_eyre::install()?;
 	let cli = Cli::parse();
-	let cfg = Config::get_config()?;
+	let cfg = Config::get_config().wrap_err("Failed to get config")?;
 	let toki = match cli.toki {
 		None => cfg.toki,
 		Some(toki) => toki,
 	};
 
-	let url = format!("https://api.linku.la/v1/words?lang={}", toki);
-	let response_string = match cache::get_from_cache(&url, cfg.cache_lifetime_seconds)? {
+	let json = match cache::get_from_cache(&toki, cfg.cache_lifetime_seconds)? {
 		None => {
-			let result = isahc::get(&url)?.text()?;
-			cache::add_cache(url, result.clone())?;
-			result
+			let url = format!("https://api.linku.la/v1/words?lang={}", toki);
+			let response = isahc::get(&url)
+				.wrap_err("Failed to download data")?
+				.text()
+				.wrap_err("Downloaded data is not text")?;
+			let json: Value = serde_json::from_str(&response)
+				.wrap_err_with(|| format!("Failed to parse response string: {}", response))?;
+			cache::write_to_cache(&toki, &json)?;
+			json
 		}
 		Some(result) => result,
 	};
 
-	let json: Value = serde_json::from_str(&response_string)?;
+	let json = &json[cli.word];
 	if cli.json {
-		println!("{}", json[cli.word].clone());
+		println!("{json}");
 		return Ok(());
 	}
-	let response: ApiResult = serde_json::from_value(json[cli.word].clone())?;
-	match response {
-		ApiResult::Word(word) => show(word, toki),
-		ApiResult::Error { message } => eprintln!("Error: {}", message),
-	}
+
+	let word: Word = serde_json::from_value(json.clone())
+		.wrap_err_with(|| format!("Failed to get api result: {}", json))?;
+	show(word, toki);
 	Ok(())
 }
 
-fn show(word: Box<Word>, toki: String) {
+fn show(word: Word, toki: String) {
 	let translations = word.translations;
 	let definition = translations
 		.get(&toki)

@@ -1,3 +1,5 @@
+use color_eyre::Result;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
 	pub toki: String,
@@ -14,7 +16,7 @@ impl Default for Config {
 }
 
 impl Config {
-	pub fn get_config() -> crate::error::Result<Self> {
+	pub fn get_config() -> Result<Self> {
 		Ok(confy::load("seme", "config")?)
 	}
 }
